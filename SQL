@@ -1,0 +1,378 @@
+
+Select *
+From us_project.us_household_income;
+## → Check raw geographic table: state, county, city, place, type, land/water
+
+Select * 
+FROM us_project.us_household_income_statistics;
+## → Check raw income table: mean, median, primary income by id
+
+ALTER TABLE us_project.us_household_income_statistics 
+RENAME COLUMN `ï»¿id` TO `id`;
+## → Fix garbled column name (common CSV import artifact: BOM characters)
+
+Select COUNT(id)
+From us_project.us_household_income;
+## → Total rows in geography table (expect ~45k)
+
+Select COUNT(id)
+FROM us_project.us_household_income_statistics;
+## → Total rows in income table (should match after cleaning)
+
+################################################################################
+# 2. REMOVE DUPLICATES (us_household_income)
+################################################################################
+
+Select id, COUNT(id)
+From us_project.us_household_income
+group by id
+having COUNT(id) > 1;
+## → Identify duplicate id values (if any)
+
+SELECT *
+FROM (
+  Select row_id,
+    id, 
+    ROW_NUMBER() OVER (Partition by id order by id) AS row_num
+  FROM us_project.us_household_income
+) AS duplicates 
+WHERE row_num > 1;
+## → Show only the extra copies (row_num > 1) that need deletion
+
+DELETE FROM us_household_income
+WHERE row_id IN (
+  SELECT row_id
+  FROM (
+    Select row_id,
+      id, 
+      ROW_NUMBER() OVER (Partition by id order by id) AS row_num
+    FROM us_project.us_household_income
+  ) AS duplicates 
+  WHERE row_num > 1
+);
+## → Permanently delete all duplicate rows, keeping one per id
+
+################################################################################
+# 3. REMOVE DUPLICATES (us_household_income_statistics)
+################################################################################
+
+Select id, COUNT(id)
+From us_project.us_household_income_statistics
+group by id
+having COUNT(id) > 1;
+## → Check for duplicates in income table (none found in this dataset)
+
+################################################################################
+# 4. STANDARDIZE STATE & PLACE NAMES
+################################################################################
+
+Select DISTINCT State_Name
+From us_project.us_household_income
+order by 1;
+## → Spot typos: 'georia', 'alabama' (lowercase), etc.
+
+UPDATE us_project.us_household_income
+SET state_name = 'Georgia'
+WHERE state_name = 'georia';
+## → Fix Georgia typo
+
+UPDATE us_project.us_household_income
+SET state_name = 'Alabama'
+WHERE state_name = 'alabama';
+## → Normalize Alabama to title case
+
+Select DISTINCT State_ab
+From us_project.us_household_income
+order by 1;
+## → Verify state abbreviations are consistent
+
+Select *
+From us_project.us_household_income
+WHERE County = 'Autauga County' 
+order by 1;
+## → Inspect a specific county with a known place-name mismatch
+
+UPDATE us_household_income
+SET place = 'Autaugaville' 
+WHERE county = 'Autauga County' 
+AND city = 'Vinemont';
+## → Correct place name for a city that was mis-mapped to Vinemont
+
+################################################################################
+# 5. HARMONIZE AREA TYPE VALUES
+################################################################################
+
+SELECT type, COUNT(type)
+From us_project.us_household_income
+GROUP BY type;
+## → See all unique 'type' values: City, CDP, Borough, Boroughs, Community, etc.
+
+UPDATE us_household_income
+SET type = 'Borough'
+WHERE type = 'Boroughs';
+## → Consolidate plural/singular into single 'Borough'
+
+################################################################################
+# 6. IDENTIFY MISSING LAND/WATER VALUES
+################################################################################
+
+SELECT ALand, AWater
+From us_project.us_household_income  
+WHERE (Awater = 0 OR Awater = '' OR Awater IS NULL) 
+  AND (Aland = 0 OR Aland = '' OR Aland IS NULL);
+## → Flag rows with no land or water (often placeholder or record errors)
+## → These are kept for now but should be reviewed if used in geospatial maps
+
+################################################################################
+# 7. CLEANING SUMMARY (Side Notes)
+################################################################################
+## → Column name fixed (ï»¿id → id)
+## → Duplicates removed from us_household_income (none in statistics)
+## → State names standardized (Georgia, Alabama)
+## → Place name corrected (Autaugaville)
+## → Type values unified (Boroughs → Borough)
+## → Missing land/water identified (0/NULL)
+## → Dataset now ready for join & exploration
+
+################################################################################
+# 8. EXPLORATORY DATA ANALYSIS (EDA)
+################################################################################
+
+Select *
+From us_household_income_statistics;
+SELECT *
+FROM us_household_income;
+## → Final sanity check before joining
+
+--------------------------------------------------------------------------------
+# 8.1 LAND & WATER BY STATE
+--------------------------------------------------------------------------------
+
+SELECT State_Name, SUM(ALand) AS total_land, SUM(Awater) AS total_water
+FROM us_project.us_household_income
+GROUP BY State_Name
+ORDER BY 2 DESC;
+## → Largest land mass: TX, CA, MI
+
+SELECT State_Name, SUM(ALand) AS total_land, SUM(Awater) AS total_water
+FROM us_project.us_household_income
+GROUP BY State_Name
+ORDER BY 3 DESC;
+## → Largest water mass: AK, FL, LA
+
+SELECT State_Name, SUM(ALand) AS total_land, SUM(Awater) AS total_water
+FROM us_project.us_household_income
+GROUP BY State_Name
+ORDER BY 2 DESC
+LIMIT 10;
+## → Top 10 states by land (change ORDER BY 3 for top 10 by water)
+
+--------------------------------------------------------------------------------
+# 8.2 JOIN GEOGRAPHY + INCOME
+--------------------------------------------------------------------------------
+
+SELECT * 
+FROM us_household_income u
+JOIN us_household_income_statistics us
+   ON u.id = us.id;
+## → Inner join: only matching ids (most common analysis view)
+
+SELECT * 
+FROM us_household_income u
+RIGHT JOIN us_household_income_statistics us
+   ON u.id = us.id 
+WHERE u.id IS NULL;
+## → Right join test: find income rows with NO geography (missing data)
+## → Many rows here → decide to exclude or fix source Excel
+
+SELECT * 
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us
+   ON u.id = us.id
+WHERE mean <> 0;
+## → Filter out unreported / suppressed income (mean = 0)
+
+SELECT u.State_Name, County, Type, `Primary`, mean, median
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us    
+   ON u.id = us.id
+WHERE mean <> 0;
+## → Core working set: categorical + income metrics
+
+--------------------------------------------------------------------------------
+# 8.3 STATE-LEVEL INCOME RANKINGS
+--------------------------------------------------------------------------------
+
+SELECT u.State_Name, AVG(mean) AS avg_mean, AVG(median) AS avg_median
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us    
+   ON u.id = us.id
+WHERE mean <> 0
+GROUP BY u.State_Name;
+## → Raw averages (will be rounded next)
+
+SELECT u.State_Name, 
+       ROUND(AVG(mean),1) AS avg_mean, 
+       ROUND(AVG(median),1) AS avg_median
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us    
+   ON u.id = us.id
+WHERE mean <> 0
+GROUP BY u.State_Name
+ORDER BY 2 ASC;
+## → Lowest → highest mean income by state
+## → Limit 5 to see the 5 poorest states
+
+SELECT u.State_Name, 
+       ROUND(AVG(mean),1) AS avg_mean, 
+       ROUND(AVG(median),1) AS avg_median
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us    
+   ON u.id = us.id
+WHERE mean <> 0
+GROUP BY u.State_Name
+ORDER BY 2 DESC
+LIMIT 20;
+## → Top 20 richest states by mean income
+
+SELECT u.State_Name, 
+       ROUND(AVG(mean),1) AS avg_mean, 
+       ROUND(AVG(median),1) AS avg_median
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us    
+   ON u.id = us.id
+WHERE mean <> 0
+GROUP BY u.State_Name
+ORDER BY 3 DESC
+LIMIT 20;
+## → Top 20 by median income (often more stable than mean)
+
+SELECT u.State_Name, 
+       ROUND(AVG(mean),1) AS avg_mean, 
+       ROUND(AVG(median),1) AS avg_median
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us    
+   ON u.id = us.id
+WHERE mean <> 0
+GROUP BY u.State_Name
+ORDER BY 3 DESC
+LIMIT 10;
+## → Highest median: best view of “typical” high-earning states
+
+--------------------------------------------------------------------------------
+# 8.4 INCOME BY AREA TYPE (City, CDP, Borough, Community, etc.)
+--------------------------------------------------------------------------------
+
+SELECT type, 
+       ROUND(AVG(mean),1) AS avg_mean, 
+       ROUND(AVG(median),1) AS avg_median
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us    
+   ON u.id = us.id
+WHERE mean <> 0
+GROUP BY type
+ORDER BY 2 DESC;
+## → Which area types earn the most (Cities & Boroughs top)
+
+SELECT type, 
+       COUNT(type) AS count,
+       ROUND(AVG(mean),1) AS avg_mean, 
+       ROUND(AVG(median),1) AS avg_median
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us    
+   ON u.id = us.id
+WHERE mean <> 0
+GROUP BY 1 
+ORDER BY 3 DESC;
+## → Add counts to confirm sample size per type
+
+SELECT type, 
+       COUNT(type) AS count,
+       ROUND(AVG(mean),1) AS avg_mean, 
+       ROUND(AVG(median),1) AS avg_median
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us    
+   ON u.id = us.id
+WHERE mean <> 0
+GROUP BY 1 
+ORDER BY 4 DESC;
+## → Rank by median instead (shows which types have highest “typical” income)
+
+Select * 
+from us_household_income                  
+where type = 'Community';
+## → Inspect low-income 'Community' rows (often Puerto Rico & rural areas)
+
+SELECT type, 
+       COUNT(type) AS count,
+       ROUND(AVG(mean),1) AS avg_mean, 
+       ROUND(AVG(median),1) AS avg_median
+FROM us_project.us_household_income u
+INNER JOIN us_project.us_household_income_statistics us    
+   ON u.id = us.id
+WHERE mean <> 0
+GROUP BY 1 
+HAVING COUNT(type) > 100
+ORDER BY 4 DESC;
+## → Filter out rare types (count ≤ 100) to focus on robust comparisons
+
+--------------------------------------------------------------------------------
+# 8.5 RICHEST CITIES BY STATE
+--------------------------------------------------------------------------------
+
+select * 
+from us_project.us_household_income u
+JOIN us_project.us_household_income_statistics us 
+       ON u.id = us.id;
+## → Base join for city-level analysis
+
+select u.State_Name, city, ROUND(AVG(MEAN),1) AS avg_mean
+from us_project.us_household_income u
+JOIN us_project.us_household_income_statistics us 
+       ON u.id = us.id 
+GROUP BY u.state_name, city;
+## → Avg mean income by state + city (unsorted)
+
+select u.State_Name, city, ROUND(AVG(MEAN),1) AS avg_mean
+from us_project.us_household_income u
+JOIN us_project.us_household_income_statistics us 
+       ON u.id = us.id 
+GROUP BY u.state_name, city
+ORDER BY 3 DESC;
+## → Rank all cities by mean income (richest first)
+
+select u.State_Name, city, 
+       ROUND(AVG(MEAN),1) AS avg_mean, 
+       ROUND(AVG(median),1) AS avg_median
+from us_project.us_household_income u
+JOIN us_project.us_household_income_statistics us 
+       ON u.id = us.id 
+GROUP BY u.state_name, city
+ORDER BY 3 DESC;
+## → Add median to see if high mean is driven by outliers (top-coding)
+
+################################################################################
+# 9. EDA SUMMARY (Side Notes)
+################################################################################
+## → Land/water: TX, CA, MI largest; AK, FL, La most water
+## → Join strategy: INNER JOIN + filter mean <> 0 (exclude unreported)
+## → State rankings:
+##    - Lowest mean: MS, AR, WV
+##    - Highest mean/median: MD, MA, CT, NJ
+## → Area types:
+##    - Cities & Boroughs = highest income
+##    - Communities & CDPs = lowest income
+## → Richest cities: Los Altos (CA), Hollywood Hills (FL), Pleasanton (CA), etc.
+## → Median often capped → high mean may reflect top‑coding, not true outliers
+## → Dataset now clean, joined, and ready for Tableau/Power BI/Python viz
+
+################################################################################
+# 10. READY FOR VISUALIZATION
+################################################################################
+## → Export results to CSV for:
+##    - State income bar charts
+##    - Heat maps (income by state)
+##    - City-level scatter plots (mean vs median)
+##    - Type-based comparisons (box plots by area type)
+## → Share with stakeholders: “Where to target high‑end retail”, 
+##    “Which states need economic stimulus”, “Richest neighborhoods per state”
