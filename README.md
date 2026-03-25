@@ -1,6 +1,6 @@
 # US-Household-Income-Data-Cleaning-Exploratory-Data-Analysis
 
-A complete MySQL project that cleans and explores the us_project household income dataset (2020–2024 ACS estimates) to answer:
+A SQL project that cleans and explores the us_project household income dataset (2020–2024 ACS estimates) to answer:
 
 Which states and cities have the highest/lowest mean and median household incomes?
 
